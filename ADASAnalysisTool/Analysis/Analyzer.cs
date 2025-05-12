@@ -1,12 +1,12 @@
 ﻿// Analyzer.cs
 using ADASAnalysisTool.Models;
-// No need for ADASAnalysisTool.Utils here if not directly used
+using ADASAnalysisTool.Utils;
 
 namespace ADASAnalysisTool.Analysis
 {
     public static class Analyzer
     {
-        public static void AnalyzeSystem(List<Core> cores, List<Component> components, List<Tasks> tasks)
+        public static void AnalyzeSystem(List<Core> cores, List<Component> components, List<Tasks> tasks, string outputLocal)
         {
             // Assign tasks to components
             foreach (var task in tasks)
@@ -19,6 +19,19 @@ namespace ADASAnalysisTool.Analysis
                 else
                 {
                     Console.WriteLine($"Warning: Task {task.Name} references non-existent component {task.ComponentId}");
+                }
+            }
+            // Assign RM priorities based on period (if not already set)
+            foreach (var comp in components)
+            {
+                if (comp.Scheduler == "RM")
+                {
+                    var tasksSorted = comp.Tasks.OrderBy(t => t.Period).ToList(); // RM: shorter period = higher priority
+                    for (int i = 0; i < tasksSorted.Count; i++)
+                    {
+                        if (!tasksSorted[i].Priority.HasValue)
+                            tasksSorted[i].Priority = i;
+                    }
                 }
             }
 
@@ -35,7 +48,9 @@ namespace ADASAnalysisTool.Analysis
                     continue;
                 }
 
-                Console.WriteLine($"\nAnalyzing Core {core.Id} (Speed = {core.SpeedFactor})"); // Removed core.Scheduler as it's not used at this level yet
+                //Console.WriteLine($"\nAnalyzing Core {core.Id} (Speed = {core.SpeedFactor})"); // Removed core.Scheduler as it's not used at this level yet
+                Console.WriteLine($"\n========== Analyzing Core {core.Id} ==========");
+                Console.WriteLine($"Core Speed Factor = {core.SpeedFactor:F2}, Scheduler = {core.Scheduler}\n");
 
                 // Calculate BDR Demand Interface for each component
                 foreach (var component in coreGroup)
@@ -62,9 +77,17 @@ namespace ADASAnalysisTool.Analysis
                     {
                         case "EDF":
                             EDFAnalyzer.CalculateAndSetBDRDemandInterface(component);
+                            if (component.IsInterfaceSchedulable)
+                            {
+                                EDFAnalyzer.ComputeWCRT_EDF(component); // <-- Add this
+                            }
                             break;
                         case "RM":
                             RMAnalyzer.CalculateAndSetBDRDemandInterface(component);
+                            if (component.IsInterfaceSchedulable)
+                            {
+                                RMAnalyzer.ComputeWCRT_RM(component); // <-- Add this
+                            }
                             break;
                         default:
                             Console.WriteLine($"--- Unknown Scheduler '{component.Scheduler}' for component {component.Id}. Skipping interface calculation.");
@@ -74,25 +97,61 @@ namespace ADASAnalysisTool.Analysis
                             break;
                     }
 
+                    if (!component.IsInterfaceSchedulable && component.Scheduler == "RM")
+                    {
+                        Console.WriteLine($"Trying RTA fallback for RM Component {component.Id}...");
+                        bool rtaPass = RMAnalyzer.OriginalRTAAnalysis(component);
+                        Console.WriteLine($"RTA Result for {component.Id}: {(rtaPass ? "Schedulable" : "Not schedulable")}");
+
+                        if (rtaPass)
+                        {
+                            component.IsInterfaceSchedulable = true;
+                            component.Alpha = component.Tasks.Sum(t => t.WCET) / component.Tasks.Sum(t => t.Period); // Conservative: total utilization
+                            component.Delta = component.Tasks.Max(t => t.Period); // Safe upper bound
+                            Console.WriteLine($"-- Using fallback RTA: assigning Alpha={component.Alpha:F4}, Delta={component.Delta:F2}");
+                            RMAnalyzer.ComputeWCRT_RM(component);
+                        }
+                    }
+
                     if (component.IsInterfaceSchedulable)
                     {
-                        Console.WriteLine($"-- Component {component.Id} Demand Interface: Alpha = {component.Alpha:F4}, Delta = {component.Delta:F2}. Workload Schedulable with this interface.");
+                        Console.WriteLine($"Derived BDR Interface: Alpha = {component.Alpha:F4}, Delta = {component.Delta:F2}");
                     }
                     else
                     {
-                        Console.WriteLine($"-- Component {component.Id}: Could not derive a schedulable BDR demand interface (Alpha <= 1).");
+                        Console.WriteLine($"-- Component {component.Id}: UNSCHEDULABLE");
+                        Console.WriteLine($"   Final Alpha = {component.Alpha:F4}, Delta = {component.Delta:F2}");
+                        Console.WriteLine("   Check if task demand is too high for any possible (α, Δ).\n");
                     }
                 }
 
                 // TODO: Next step would be to analyze schedulability of these component interfaces on the core
                 // using the core's scheduler (core.Scheduler) and Theorem 1 / Theorem 3 from HSS chapter.
                 // For now, we are just deriving the interfaces.
-                Console.WriteLine($"\n--- Core {core.Id} Component Interface Derivation Complete ---");
+                // Console.WriteLine($"\n--- Core {core.Id} Component Interface Derivation Complete ---");
+                Console.WriteLine($"\n=== Core {core.Id} Component Summary ===");
+                foreach (var comp in coreGroup)
+                {
+                    string status = comp.IsInterfaceSchedulable ? "Schedulable" : "UNSCHEDULABLE";
+                    Console.WriteLine($"Component {comp.Id}: {status}, α={comp.Alpha:F3}, Δ={comp.Delta:F2}");
+                }
                 // Example: Perform system-level schedulability for components on this core
                 // This is a placeholder for the next stage of analysis
+
+
+
                 PerformCoreLevelComponentSchedulability(core, coreGroup.ToList());
 
+                Console.WriteLine("\n--- Task-Level WCRT Summary ---");
+                foreach (var task in tasks)
+                {
+                    if (task.WCRT.HasValue)
+                    {
+                        Console.WriteLine($"Task {task.Name}: WCRT = {task.WCRT:F2}, Period = {task.Period}, Util = {task.WCET / task.Period:F3}");
+                    }
+                }
             }
+            CsvExport.ExportAnalysisToCsv(components, outputLocal);
         }
 
         // Placeholder for system-level schedulability of components on a core

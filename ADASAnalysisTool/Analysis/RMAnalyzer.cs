@@ -9,7 +9,7 @@ namespace ADASAnalysisTool.Analysis
 {
     public static class RMAnalyzer
     {
-        private const double timeStep = 1.0; // Define timeStep with a default value of 1.0  
+        private const double timeStep = 0.5; // Define timeStep with a default value of 1.0  
 
         // Calculates the BDR Demand Interface (alpha, delta) for the component
         public static void CalculateAndSetBDRDemandInterface(Component component)
@@ -24,93 +24,143 @@ namespace ADASAnalysisTool.Analysis
             }
 
             var sortedTasks = component.Tasks.OrderBy(t => t.Priority ?? int.MaxValue).ToList();
-            // Max delta could be related to max D_i, or a smaller heuristic.
-            // Let's use max task period as D_i for now.
-            double maxDeltaToTry = sortedTasks.Any() ? sortedTasks.Max(t => t.Period) : component.Period;
-            const double timeStepDelta = 0.1; // Step for iterating Delta
+
+            double maxDeltaToTry = Math.Min(
+                MathUtils.LCM(sortedTasks.Select(t => t.Period).ToList()),
+                1000.0
+            );
+
+            const double timeStepDelta = 0.1;
+            const double timeStep = 0.5;
 
             for (double currentDelta = 0; currentDelta <= maxDeltaToTry; currentDelta += timeStepDelta)
             {
                 double maxRequiredAlphaForComponentThisDelta = 0.0;
                 bool possibleForAllTasksThisDelta = true;
-               
+
                 foreach (var task_i in sortedTasks)
                 {
-                    double deadline_Di = task_i.Period; // Assuming D_i = T_i
-
-                    // Calculate demand for task_i at its deadline D_i
-                    // This is dbf_RM(W, D_i, i)
+                    double deadline_Di = task_i.Period;
                     double dbf_at_Di = CalculateDBF_RM_ForTask(sortedTasks, deadline_Di, task_i);
 
-                    if (dbf_at_Di == 0 && deadline_Di <= currentDelta) continue;
+                    Console.WriteLine($"[DEBUG]       [DBF] {task_i.Name} at t={deadline_Di:F2}: base={task_i.WCET}, total={dbf_at_Di}");
+                    Console.WriteLine($"[DEBUG]     [TASK {task_i.Name}] D_i={deadline_Di}, Δ={currentDelta:F1}, dbf(D_i)={dbf_at_Di:F2}");
 
-                    if (dbf_at_Di > 0 && deadline_Di <= currentDelta) // Demand exists, but SBF is 0 up to D_i
-                    {
-                        possibleForAllTasksThisDelta = false;
-                        break;
-                    }
-
-                    if (deadline_Di > currentDelta) // SBF can be > 0 at D_i
+                    if (deadline_Di <= currentDelta)
                     {
                         if (dbf_at_Di > 0)
                         {
-                            // We need SBF(alpha, currentDelta, deadline_Di) >= dbf_at_Di
-                            // alpha * (deadline_Di - currentDelta) >= dbf_at_Di
-                            // alpha >= dbf_at_Di / (deadline_Di - currentDelta)
-                            if ((deadline_Di - currentDelta) < 0.00001) // Avoid division by zero if D_i is very close to currentDelta
-                            {
-                                // If dbf_at_Di > 0, this implies infinite alpha needed
-                                possibleForAllTasksThisDelta = false;
-                                break;
-                            }
-                            double requiredAlphaForTask_i = dbf_at_Di / (deadline_Di - currentDelta);
-                            maxRequiredAlphaForComponentThisDelta = Math.Max(maxRequiredAlphaForComponentThisDelta, requiredAlphaForTask_i);
-                           
+                            possibleForAllTasksThisDelta = false;
+                            break;
                         }
+                        else
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (dbf_at_Di > 0)
+                    {
+                        double requiredAlphaForTask_i = dbf_at_Di / (deadline_Di - currentDelta);
+                        maxRequiredAlphaForComponentThisDelta = Math.Max(maxRequiredAlphaForComponentThisDelta, requiredAlphaForTask_i);
                     }
                 }
 
-                if (!possibleForAllTasksThisDelta)  // Try next delta
-                {
-    
+                Console.WriteLine($"[DEBUG] ?={currentDelta:F2}, maxRequiredAlpha={maxRequiredAlphaForComponentThisDelta:F5}, valid={maxRequiredAlphaForComponentThisDelta <= 1.0}");
+
+                if (!possibleForAllTasksThisDelta)
                     continue;
+
+                // === Special verification case for α = 0 ===
+                if (maxRequiredAlphaForComponentThisDelta <= 0.00001)
+                {
+                    bool verified = true;
+                    foreach (var task in sortedTasks)
+                    {
+                        if (task.Period <= currentDelta) continue;
+
+                        for (double t = currentDelta + timeStep; t <= task.Period; t += timeStep)
+                        {
+                            double dbf = TotalDBF_RM(sortedTasks, t);
+                            double sbf = EDFAnalyzer.SBF_BDR(0.0, currentDelta, t);
+
+                            if (dbf > sbf + 0.00001)
+                            {
+                                Console.WriteLine($"[DEBUG]     Verification FAILED for α=0 at t={t:F2}: dbf={dbf:F2} > sbf={sbf:F2}");
+                                verified = false;
+                                break;
+                            }
+                        }
+
+                        if (!verified) break;
+                    }
+
+                    if (verified)
+                    {
+                        component.Alpha = 0.0;
+                        component.Delta = currentDelta;
+                        component.IsInterfaceSchedulable = true;
+                        Console.WriteLine($"--- Derived for RM Component {component.Id}: Alpha=0.0000, Delta={component.Delta:F2}");
+                        return;
+                    }
+                    else
+                    {
+                        continue;
+                    }
                 }
 
-                    if (maxRequiredAlphaForComponentThisDelta <= 1.00001 && maxRequiredAlphaForComponentThisDelta >= 0) // Add small tolerance
+                // === General verification for α > 0 ===
+                if (maxRequiredAlphaForComponentThisDelta <= 1.00001)
                 {
-                    // Now, we have a candidate (alpha, delta). We must verify it for *all* t for *all* tasks.
-                    // This is the more rigorous check. The above was a necessary condition based on deadlines.
                     bool verifiedForAllT = true;
+
+                    bool hasVerifiableTask = sortedTasks.Any(task => task.Period > currentDelta);
+                    if (!hasVerifiableTask)
+                    {
+                        Console.WriteLine($"[DEBUG]     Skipping verification at Δ={currentDelta:F2}: no task deadlines > Δ");
+                        continue;
+                    }
+
+                    int verificationPointsChecked = 0;
+
                     foreach (var task_i_verify in sortedTasks)
                     {
-                        // Verification loop for this task_i_verify:
-                        for (double t_verify = timeStep; t_verify <= task_i_verify.Period; t_verify += timeStep) // Start from timeStep
+                        if (task_i_verify.Period <= currentDelta)
+                            continue;
+
+                        for (double t_verify = currentDelta + timeStep; t_verify <= task_i_verify.Period; t_verify += timeStep)
                         {
-                            double dbf_verify = CalculateDBF_RM_ForTask(sortedTasks, t_verify, task_i_verify);
+                            double dbf_verify = TotalDBF_RM(sortedTasks, t_verify);
                             double sbf_verify = EDFAnalyzer.SBF_BDR(maxRequiredAlphaForComponentThisDelta, currentDelta, t_verify);
+
+                            verificationPointsChecked++;
+
                             if (dbf_verify > sbf_verify + 0.00001)
                             {
-                                // Console.WriteLine($"---- RM Verification FAILED for Task {task_i_verify.Name} at t_verify={t_verify}: dbf={dbf_verify}, sbf={sbf_verify} (Alpha={maxRequiredAlphaForComponentThisDelta}, Delta={currentDelta})");
+                                Console.WriteLine($"[DEBUG]     Verification FAILED at t={t_verify:F2}: dbf={dbf_verify:F2} > sbf={sbf_verify:F2}");
                                 verifiedForAllT = false;
                                 break;
                             }
                         }
-                        if (!verifiedForAllT) break;
 
-                        // Edge case: Task period is very small
+                        if (!verifiedForAllT)
+                            break;
+
                         if (task_i_verify.Period < timeStep && task_i_verify.Period > 0)
                         {
-                            double dbf_at_period = CalculateDBF_RM_ForTask(sortedTasks, task_i_verify.Period, task_i_verify);
+                            double dbf_at_period = TotalDBF_RM(sortedTasks, task_i_verify.Period);
                             double sbf_at_period = EDFAnalyzer.SBF_BDR(maxRequiredAlphaForComponentThisDelta, currentDelta, task_i_verify.Period);
+                            verificationPointsChecked++;
+
                             if (dbf_at_period > sbf_at_period + 0.00001)
                             {
                                 verifiedForAllT = false;
-                                if (!verifiedForAllT) break;
+                                break;
                             }
                         }
                     }
 
-                    if (verifiedForAllT)
+                    if (verifiedForAllT && verificationPointsChecked > 0)
                     {
                         component.Alpha = maxRequiredAlphaForComponentThisDelta;
                         component.Delta = currentDelta;
@@ -122,13 +172,15 @@ namespace ADASAnalysisTool.Analysis
             }
 
             component.IsInterfaceSchedulable = false;
-            if (!component.IsInterfaceSchedulable)
-            {
-                component.Alpha = double.PositiveInfinity;
-                component.Delta = double.PositiveInfinity;
-            }
+            component.Alpha = double.PositiveInfinity;
+            component.Delta = double.PositiveInfinity;
             Console.WriteLine($"--- Could not find a schedulable BDR interface for RM Component {component.Id} (alpha <= 1).");
         }
+
+
+
+
+
 
         // Demand Bound Function for a specific task_i in an RM component at time t
         // HSS Chapter Eq. (4)
@@ -147,6 +199,7 @@ namespace ADASAnalysisTool.Analysis
                     }
                 }
             }
+            Console.WriteLine($"[DEBUG]       [DBF] {task_i.Name} at t={t:F2}: base={task_i.WCET}, total={demand}");
             return demand;
         }
 
@@ -189,6 +242,78 @@ namespace ADASAnalysisTool.Analysis
                 } while (R != prevR);
             }
             return true;
+        }
+
+        public static void ComputeWCRT_RM(Component component)
+        {
+            if (!component.IsInterfaceSchedulable || component.Alpha > 1 || component.Alpha < 0)
+            {
+                Console.WriteLine($"Skipping WCRT computation for Component {component.Id}: Invalid or unschedulable BDR interface.");
+                return;
+            }
+
+            double alpha = component.Alpha;
+            double delta = component.Delta;
+            var tasks = component.Tasks.OrderBy(t => t.Priority ?? int.MaxValue).ToList();
+
+            foreach (var task in tasks)
+            {
+                double D = task.Period;
+                double R = task.WCET;
+                double prevR;
+                int iterationLimiter = 0;
+                const int MAX_ITER = 1000;
+
+                do
+                {
+                    prevR = R;
+                    double interference = 0;
+
+                    foreach (var hpTask in tasks)
+                    {
+                        if (hpTask.Priority < task.Priority)
+                        {
+                            if (hpTask.Period > 0)
+                                interference += Math.Ceiling(prevR / hpTask.Period) * hpTask.WCET;
+                        }
+                    }
+
+                    R = task.WCET + interference;
+
+                    // BDR supply bound check
+                    double sbf = EDFAnalyzer.SBF_BDR(alpha, delta, R);
+                    if (sbf < R)
+                    {
+                        R = double.PositiveInfinity;
+                        break;
+                    }
+
+                    iterationLimiter++;
+                    if (iterationLimiter > MAX_ITER)
+                    {
+                        Console.WriteLine($"WCRT for task {task.Name} in {component.Id} did not converge.");
+                        R = double.PositiveInfinity;
+                        break;
+                    }
+
+                } while (Math.Abs(R - prevR) > 1e-3);
+
+                task.WCRT = R;
+                Console.WriteLine($"Task {task.Name} in Component {component.Id}: WCRT ≈ {R:F2}");
+            }
+        }
+
+        public static double TotalDBF_RM(List<Tasks> tasks, double t)
+        {
+            double total = 0.0;
+            foreach (var task in tasks)
+            {
+                if (task.Period > 0)
+                {
+                    total += Math.Floor((t + task.Period) / task.Period) * task.WCET;
+                }
+            }
+            return total;
         }
     }
 }

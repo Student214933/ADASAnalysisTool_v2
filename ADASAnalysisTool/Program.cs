@@ -18,15 +18,20 @@ namespace ADASAnalysisTool
         const String folder10 = "10-unschedulable-test-case";
         static void Main(string[] args)
         {
-            Console.WriteLine("Program has begun");
+            Console.WriteLine("=============== ADAS Hierarchical Scheduling Analysis ===============");
 
-            var cores = CsvLoader.LoadCores(folder9);
-            var components = CsvLoader.LoadComponents(folder9);
-            var tasks = CsvLoader.LoadTasks(folder9);
+            var folder = folder1;
 
-            Analyzer.AnalyzeSystem(cores, components, tasks);
+            var cores = CsvLoader.LoadCores(folder);
+            var components = CsvLoader.LoadComponents(folder);
+            var tasks = CsvLoader.LoadTasks(folder);
 
-            Console.WriteLine("Analysis done");
+            Analyzer.AnalyzeSystem(cores, components, tasks, $"Data/{folder}/analysis_output.csv");
+
+            // Flatten all tasks into one list for correct export (from within component objects)
+            var allTasks = components.SelectMany(c => c.Tasks).ToList();
+
+            Console.WriteLine("========================== Analysis Complete ==========================");
         }
     }
 }

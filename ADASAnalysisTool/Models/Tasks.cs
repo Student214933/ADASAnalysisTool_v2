@@ -11,6 +11,7 @@ namespace ADASAnalysisTool.Models
         public double Period;
         public string ComponentId;
         public int? Priority; // Only relevant for RM
+        public double? WCRT;
 
         public Tasks()
         {

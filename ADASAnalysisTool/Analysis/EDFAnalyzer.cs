@@ -21,7 +21,7 @@ namespace ADASAnalysisTool.Analysis
                 return;
             }
 
-            double tMax = MathUtils.LCM(component.Tasks.Select(t => t.Period).ToList());
+            double tMax = (double)MathUtils.LCM(component.Tasks.Select(t => t.Period).ToList());
             // Heuristic for max delta to try: maximum task period within the component,
             // or component's own input period if no tasks.
             double maxDeltaToTry = component.Tasks.Any() ? component.Tasks.Max(t => t.Period) : component.Period;
@@ -122,5 +122,45 @@ namespace ADASAnalysisTool.Analysis
             }
             return totalDemand;
         }
+
+        public static void ComputeWCRT_EDF(Component component)
+        {
+            if (!component.IsInterfaceSchedulable || component.Alpha > 1 || component.Alpha < 0)
+            {
+                Console.WriteLine($"Skipping WCRT computation for Component {component.Id}: Invalid or unschedulable BDR interface.");
+                return;
+            }
+
+            double alpha = component.Alpha;
+            double delta = component.Delta;
+
+            foreach (var task in component.Tasks)
+            {
+                double D = task.Period; // Assuming implicit deadline model
+                double tMax = MathUtils.LCM(component.Tasks.Select(t => t.Period).ToList());
+                double timeStep = 1.0;
+
+                double minSlack = double.PositiveInfinity;
+
+                for (double t = D; t <= tMax; t += timeStep)
+                {
+                    double dbf = CalculateDBF_EDF(component.Tasks, t);
+                    double sbfInput = dbf;
+                    double sbfTime = SBF_BDR(alpha, delta, t);
+
+                    // Try to find the earliest time point where the supply is enough
+                    double slack = t - sbfInput;
+                    if (sbfTime >= dbf)
+                    {
+                        minSlack = Math.Min(minSlack, slack);
+                    }
+                }
+
+                task.WCRT = (minSlack == double.PositiveInfinity) ? double.PositiveInfinity : task.Period - minSlack;
+                Console.WriteLine($"Task {task.Name} in Component {component.Id}: WCRT ≈ {task.WCRT:F2}");
+            }
+        }
     }
+
+
 }
