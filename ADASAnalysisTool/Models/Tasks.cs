@@ -1,6 +1,7 @@
 ﻿
 
 using CsvHelper.Configuration;
+using System.Globalization;
 
 namespace ADASAnalysisTool.Models
 {
@@ -22,8 +23,8 @@ namespace ADASAnalysisTool.Models
         public TaskMapInput()
         {
             Map(m => m.Name).Name("task_name");
-            Map(m => m.WCET).Name("wcet");
-            Map(m => m.Period).Name("period");
+            Map(m => m.WCET).Name("wcet").TypeConverterOption.CultureInfo(CultureInfo.InvariantCulture);
+            Map(m => m.Period).Name("period").TypeConverterOption.CultureInfo(CultureInfo.InvariantCulture);
             Map(m => m.ComponentId).Name("component_id");
             Map(m => m.Priority).Name("priority");
         }
